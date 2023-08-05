@@ -1,0 +1,91 @@
+pipeline {
+  agent any
+  environment {
+    AWS_SECRET_KEY_ID_OBJ = credentials('AWS_SECRET_KEY_ID')
+    AWS_SECRET_ACCESS_KEY_OBJ = credentials('AWS_SECRET_ACCESS_KEY')
+    PETCLINIC_USERNAME_OBJ = credentials('PETCLINIC_USERNAME')
+    PETCLINIC_AWS_ARN_CERT_OBJ = credentials('PETCLINIC_AWS_ARN_CERT')
+  }
+  parameters {
+    string(name: "INSTANCE_AMI", defaultValue: 'ami-0b8d8539f04b44311')
+    string(name: 'APP_NAME', defaultValue: 'petclinic:v1.0')
+    string(name: 'CONTAINER_REGISTRY', defaultValue: '170.64.170.203:8083')
+  }
+  options {
+    gitLabConnection('gitlab-connection')
+  }
+  triggers {
+    gitlab(triggerOnPush: true, triggerOnMergeRequest: true, branchFilterType: 'All')
+  }
+  stages {
+    stage("test") {
+      steps {
+        script {
+          echo "Action is ${env.gitlabActionType}"
+        }
+      }
+    }
+    stage("Initialize Environment") {
+      steps {
+        writeFile file: 'user.tfvars', text: """
+AMI_ID = "${params.INSTANCE_AMI}"
+CERTIFICATE_ARN = "${PETCLINIC_AWS_ARN_CERT_OBJ_PSW}"
+DB_USERNAME = "${PETCLINIC_USERNAME_OBJ_USR}"
+DB_PASSWORD = "${PETCLINIC_USERNAME_OBJ_PSW}"
+DOMAIN_NAME = "petclinic.itfellasgroup.com"
+AWS_REGION = "ap-southeast-2"
+        """
+        script {
+          echo "Initialize Environment"
+
+          env.AWS_ACCESS_KEY_ID = "${AWS_SECRET_KEY_ID_OBJ_PSW}"
+          env.AWS_SECRET_ACCESS_KEY = "${AWS_SECRET_ACCESS_KEY_OBJ_PSW}"
+        }
+      }
+    }
+
+    stage('COMMIT') {
+      steps {
+        script {
+          echo "Action is ${env.gitlabActionType}"
+          echo "Perform commit actions"
+
+          dir("scripts") {
+            withCredentials([usernamePassword([credentialsId:'NEXUS_REPO', passwordVariable: "PASS", usernameVariable: "USER"])]) {
+              sh "./deploy-petclinic.sh $USER $PASS \"${params.CONTAINER_REGISTRY}\" \"${params.APP_NAME}\""
+            }
+          }
+
+          if (env.gitlabActionType == "PUSH" || env.gitlabActionType == "MERGE") {
+            sh 'terraform init'
+            sh 'terraform validate'
+            sh 'terraform fmt'
+            sh 'terraform plan -var-file=user.tfvars'
+          }
+        }
+      }
+    }
+
+    stage('MERGE REQUEST') {
+      steps {
+        script {
+          if (env.gitlabActionType == "MERGE") {
+            sh 'terraform apply -var-file=user.tfvars -auto-approve'
+            // updateGitlabCommitStatus name: 'build', state: 'pending'
+            // updateGitlabCommitStatus name: 'build', state: 'success'
+            // 
+          }
+        }
+      }
+    }
+
+    stage("CLEAN UP") {
+      steps {
+        script {
+          sh 'rm user.tfvars'
+        }
+      }
+    }
+  }
+}
+
